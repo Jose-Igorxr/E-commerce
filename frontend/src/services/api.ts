@@ -108,17 +108,54 @@ export async function fetchCategories(): Promise<Category[]> {
   return Array.isArray(data) ? data : data.results
 }
 
-export async function fetchProducts(params?: {
+export async function createCategory(payload: {
+  name: string
+  description?: string
+}): Promise<Category> {
+  const { data } = await api.post<Category>('/store/categories/', payload)
+  return data
+}
+
+export async function deleteCategory(slug: string): Promise<void> {
+  await api.delete(`/store/categories/${slug}/`)
+}
+
+export interface ProductQueryParams {
   category__slug?: string
   search?: string
   featured?: boolean
   ordering?: string
-}): Promise<Product[]> {
+  page?: number
+  page_size?: number
+}
+
+export async function fetchProducts(params?: ProductQueryParams): Promise<Product[]> {
   const { data } = await api.get<PaginatedResponse<Product> | Product[]>(
     '/store/products/',
     { params },
   )
   return Array.isArray(data) ? data : data.results
+}
+
+export async function fetchPaginatedProducts(
+  params?: ProductQueryParams,
+): Promise<PaginatedResponse<Product>> {
+  const { data } = await api.get<PaginatedResponse<Product> | Product[]>(
+    '/store/products/',
+    { params },
+  )
+  if (Array.isArray(data)) {
+    return {
+      count: data.length,
+      total_pages: 1,
+      current_page: 1,
+      page_size: data.length,
+      next: null,
+      previous: null,
+      results: data,
+    }
+  }
+  return data
 }
 
 export async function fetchProductById(id: number): Promise<Product> {
@@ -141,6 +178,17 @@ export async function updateProduct(
 
 export async function deleteProduct(id: number): Promise<void> {
   await api.delete(`/store/products/${id}/`)
+}
+
+export async function toggleProductSoftDelete(
+  id: number,
+  isActive?: boolean,
+): Promise<Product> {
+  const { data } = await api.post<Product>(
+    `/store/products/${id}/soft-delete/`,
+    isActive !== undefined ? { is_active: isActive } : {},
+  )
+  return data
 }
 
 // --- Carrinho Híbrido (Sincronização com Banco de Dados) ---

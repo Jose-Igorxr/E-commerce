@@ -162,8 +162,16 @@ class OrderItem(models.Model):
     product = models.ForeignKey(
         Product,
         related_name='order_items',
-        on_delete=models.PROTECT,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         verbose_name='Produto',
+    )
+    product_name_snapshot = models.CharField(
+        'Nome do Produto (Snapshot)', max_length=200, blank=True
+    )
+    product_image_snapshot = models.URLField(
+        'Imagem do Produto (Snapshot)', blank=True
     )
     quantity = models.PositiveIntegerField('Quantidade', default=1)
     unit_price = models.DecimalField('Preço Unitário', max_digits=10, decimal_places=2)
@@ -173,7 +181,12 @@ class OrderItem(models.Model):
         verbose_name_plural = 'Itens do Pedido'
 
     def __str__(self) -> str:
-        return f'{self.quantity}x {self.product.name}'
+        prod_name = (
+            self.product.name
+            if self.product
+            else (self.product_name_snapshot or 'Produto Excluído')
+        )
+        return f'{self.quantity}x {prod_name}'
 
 
 class Review(models.Model):

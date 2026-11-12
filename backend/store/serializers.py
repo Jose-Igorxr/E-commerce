@@ -35,10 +35,27 @@ class ReviewSerializer(serializers.ModelSerializer):
 
 class CategorySerializer(serializers.ModelSerializer):
     products_count = serializers.IntegerField(source='products.count', read_only=True)
+    slug = serializers.SlugField(max_length=120, required=False, allow_blank=True)
 
     class Meta:
         model = Category
         fields = ['id', 'name', 'slug', 'description', 'products_count', 'created_at']
+
+    def validate(self, attrs):
+        slug = attrs.get('slug')
+        name = attrs.get('name') or (self.instance.name if self.instance else '')
+        if not slug and name:
+            base_slug = slugify(name) or 'categoria'
+            candidate = base_slug
+            counter = 1
+            qs = Category.objects.all()
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            while qs.filter(slug=candidate).exists():
+                counter += 1
+                candidate = f'{base_slug}-{counter}'
+            attrs['slug'] = candidate
+        return attrs
 
 
 class ProductSerializer(serializers.ModelSerializer):
@@ -127,8 +144,8 @@ class CartSerializer(serializers.ModelSerializer):
 
 
 class OrderItemSerializer(serializers.ModelSerializer):
-    product_name = serializers.CharField(source='product.name', read_only=True)
-    product_image = serializers.CharField(source='product.image_url', read_only=True)
+    product_name = serializers.SerializerMethodField()
+    product_image = serializers.SerializerMethodField()
     unit_price = serializers.DecimalField(
         max_digits=10, decimal_places=2, read_only=True
     )
@@ -143,6 +160,16 @@ class OrderItemSerializer(serializers.ModelSerializer):
             'quantity',
             'unit_price',
         ]
+
+    def get_product_name(self, obj) -> str:
+        if obj.product:
+            return obj.product.name
+        return obj.product_name_snapshot or 'Produto Removido Permanentemente'
+
+    def get_product_image(self, obj) -> str:
+        if obj.product:
+            return obj.product.image_url or ''
+        return obj.product_image_snapshot or ''
 
 
 class OrderSerializer(serializers.ModelSerializer):

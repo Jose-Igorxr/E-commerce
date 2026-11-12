@@ -5,6 +5,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from .models import Cart, CartItem, Category, Order, OrderItem, Product, Review
+from .pagination import CatalogPagination
 from .permissions import IsSellerOrAdminOrReadOnly, user_is_seller_or_admin
 from .serializers import (
     CartSerializer,
@@ -19,6 +20,7 @@ class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
     permission_classes = [IsSellerOrAdminOrReadOnly]
+    pagination_class = None
     lookup_field = 'slug'
 
 
@@ -26,6 +28,7 @@ class ProductViewSet(viewsets.ModelViewSet):
     queryset = Product.objects.select_related('category').prefetch_related('reviews').all()
     serializer_class = ProductSerializer
     permission_classes = [IsSellerOrAdminOrReadOnly]
+    pagination_class = CatalogPagination
     filterset_fields = ['category__slug', 'featured']
     search_fields = ['name', 'description', 'category__name']
     ordering_fields = ['price', 'created_at', 'name']
@@ -35,6 +38,41 @@ class ProductViewSet(viewsets.ModelViewSet):
         if user_is_seller_or_admin(self.request.user):
             return qs
         return qs.filter(is_active=True)
+
+    @action(detail=True, methods=['post'], url_path='soft-delete')
+    @transaction.atomic
+    def soft_delete(self, request, pk=None):
+        """
+        Soft Delete / Reativação: Alterna o status ativo (is_active) do produto no banco,
+        preservando integralmente os OrderItems e removendo de carrinhos abertos se desativado.
+        """
+        product = self.get_object()
+        desired_state = request.data.get('is_active')
+        if desired_state is None:
+            product.is_active = not product.is_active
+        else:
+            product.is_active = bool(desired_state)
+
+        product.save(update_fields=['is_active', 'updated_at'])
+
+        if not product.is_active:
+            CartItem.objects.filter(product=product).delete()
+
+        return Response(ProductSerializer(product, context={'request': request}).data)
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        """
+        Hard Delete: Antes de excluir definitivamente o produto do banco de dados,
+        garante que todos os OrderItems históricos vinculados a ele preservem o
+        snapshot de nome e imagem para não quebrar o histórico financeiro de pedidos.
+        """
+        product = self.get_object()
+        OrderItem.objects.filter(product=product).update(
+            product_name_snapshot=product.name,
+            product_image_snapshot=product.image_url or '',
+        )
+        return super().destroy(request, *args, **kwargs)
 
     @action(
         detail=True,
@@ -326,6 +364,8 @@ class CartViewSet(viewsets.ViewSet):
             OrderItem.objects.create(
                 order=order,
                 product=locked_prod,
+                product_name_snapshot=locked_prod.name,
+                product_image_snapshot=locked_prod.image_url or '',
                 quantity=item.quantity,
                 unit_price=unit_price,
             )
@@ -408,11 +448,14 @@ class OrderViewSet(viewsets.ModelViewSet):
             # Se mudou para cancelado, estorna a quantidade para o estoque dos produtos
             if new_status == Order.Status.CANCELED and old_status != Order.Status.CANCELED:
                 for item in order.items.select_related('product').all():
-                    item.product.stock += item.quantity
-                    item.product.save(update_fields=['stock', 'updated_at'])
+                    if item.product:
+                        item.product.stock += item.quantity
+                        item.product.save(update_fields=['stock', 'updated_at'])
             # Se estava cancelado e voltou para um status ativo, baixa novamente do estoque
             elif old_status == Order.Status.CANCELED and new_status != Order.Status.CANCELED:
                 for item in order.items.select_related('product').all():
+                    if not item.product:
+                        continue
                     if item.product.stock < item.quantity:
                         return Response(
                             {

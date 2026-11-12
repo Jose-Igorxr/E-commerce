@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ShoppingBag,
   Search,
@@ -20,22 +20,29 @@ import {
   ClipboardList,
   ArrowUpDown,
   Star,
+  ChevronLeft,
+  ChevronRight,
+  ChevronDown,
+  Layers,
+  Settings,
 } from 'lucide-react'
 import {
   ACCESS_TOKEN_KEY,
   clearAuthTokens,
-  deleteProduct,
   fetchCategories,
   fetchCurrentUser,
+  fetchPaginatedProducts,
   fetchProducts,
   fetchServerCart,
   mergeCartWithServer,
   setServerCartItemQuantity,
+  toggleProductSoftDelete,
 } from './services/api'
 import AuthModal from './components/AuthModal'
 import ProductFormModal from './components/ProductFormModal'
 import ProductDetailView from './components/ProductDetailView'
 import OrdersView from './components/OrdersView'
+import ProductsManagementView from './components/ProductsManagementView'
 import FeaturedCarousel from './components/FeaturedCarousel'
 import CheckoutView from './components/CheckoutView'
 import type { CartItem, Category, Product, UserProfile } from './types/store'
@@ -73,10 +80,16 @@ function saveStoredGuestCart(items: CartItem[]) {
 export default function App() {
   const [categories, setCategories] = useState<Category[]>([])
   const [products, setProducts] = useState<Product[]>([])
+  const [featuredProducts, setFeaturedProducts] = useState<Product[]>([])
   const [selectedCategory, setSelectedCategory] = useState<string>('')
   const [searchQuery, setSearchQuery] = useState<string>('')
   const [sortBy, setSortBy] = useState<string>('')
+  const [currentPage, setCurrentPage] = useState<number>(1)
+  const [pageSize, setPageSize] = useState<number>(4)
+  const [totalPages, setTotalPages] = useState<number>(1)
+  const [totalProductsCount, setTotalProductsCount] = useState<number>(0)
   const [loading, setLoading] = useState<boolean>(true)
+  const [isPageTransitioning, setIsPageTransitioning] = useState<boolean>(false)
   const [apiConnected, setApiConnected] = useState<boolean>(false)
   const [cart, setCart] = useState<CartItem[]>(() => loadStoredGuestCart())
   const [cartOpen, setCartOpen] = useState<boolean>(false)
@@ -87,6 +100,10 @@ export default function App() {
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null)
   // Exibição da tela de Meus Pedidos / Gestão de Pedidos
   const [ordersViewOpen, setOrdersViewOpen] = useState<boolean>(false)
+  // Exibição da Aba de Gestão de Produtos & Categorias (Vendedor/Admin)
+  const [productsManagementOpen, setProductsManagementOpen] = useState<boolean>(false)
+  // Controle do Menu em Cascata (Dropdown) "Gerenciamento" no Header
+  const [managementMenuOpen, setManagementMenuOpen] = useState<boolean>(false)
   // Exibição da Página de Checkout Completa (Frete por CEP + Pagamento)
   const [checkoutViewOpen, setCheckoutViewOpen] = useState<boolean>(false)
 
@@ -98,6 +115,34 @@ export default function App() {
   // Modal de Cadastro/Edição de Produtos (Exclusivo Vendedor/Admin)
   const [productModalOpen, setProductModalOpen] = useState<boolean>(false)
   const [editingProduct, setEditingProduct] = useState<Product | null>(null)
+
+  // Referência para rolagem horizontal das categorias (estilo carrossel manual com wrap-around)
+  const categoryScrollRef = useRef<HTMLDivElement | null>(null)
+
+  const handleScrollCategories = (direction: 'left' | 'right') => {
+    const el = categoryScrollRef.current
+    if (!el) return
+    const maxScrollLeft = el.scrollWidth - el.clientWidth
+    if (maxScrollLeft <= 2) return
+
+    const step = Math.max(180, Math.round(el.clientWidth * 0.55))
+
+    if (direction === 'right') {
+      // Se já chegou no final da direita, rola de volta para a extremidade oposta (início)
+      if (el.scrollLeft >= maxScrollLeft - 6) {
+        el.scrollTo({ left: 0, behavior: 'smooth' })
+      } else {
+        el.scrollBy({ left: step, behavior: 'smooth' })
+      }
+    } else {
+      // Se já está no início da esquerda, rola até a extremidade final oposta (direita)
+      if (el.scrollLeft <= 6) {
+        el.scrollTo({ left: maxScrollLeft, behavior: 'smooth' })
+      } else {
+        el.scrollBy({ left: -step, behavior: 'smooth' })
+      }
+    }
+  }
 
   /**
    * Sincroniza o carrinho ao autenticar:
@@ -162,7 +207,7 @@ export default function App() {
     return () => window.removeEventListener('storage', handleStorageChange)
   }, [user])
 
-  useEffect(() => {
+  const loadCategories = useCallback(() => {
     fetchCategories()
       .then((cats) => {
         setCategories(cats)
@@ -171,15 +216,39 @@ export default function App() {
       .catch(() => setApiConnected(false))
   }, [])
 
+  useEffect(() => {
+    loadCategories()
+  }, [loadCategories])
+
+  const loadFeaturedProducts = useCallback(() => {
+    fetchProducts({ featured: true, page_size: 24 })
+      .then((featProds) => setFeaturedProducts(featProds))
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    loadFeaturedProducts()
+  }, [loadFeaturedProducts])
+
   const loadCatalog = useCallback(() => {
-    setLoading(true)
-    fetchProducts({
-      category__slug: selectedCategory || undefined,
-      search: searchQuery || undefined,
-      ordering: sortBy || undefined,
-    })
-      .then((prods) => {
+    setIsPageTransitioning(true)
+    const minTransitionDelay = new Promise((resolve) => setTimeout(resolve, 280))
+
+    Promise.all([
+      fetchPaginatedProducts({
+        category__slug: selectedCategory || undefined,
+        search: searchQuery || undefined,
+        ordering: sortBy || undefined,
+        page: currentPage,
+        page_size: pageSize,
+      }),
+      minTransitionDelay,
+    ])
+      .then(([paginated]) => {
+        const prods = paginated.results
         setProducts(prods)
+        setTotalProductsCount(paginated.count)
+        setTotalPages(paginated.total_pages ?? Math.max(1, Math.ceil(paginated.count / pageSize)))
         setApiConnected(true)
         // Se houver um produto aberto na tela de detalhes, sincroniza os dados dele também
         setSelectedProduct((prevSelected) => {
@@ -203,9 +272,19 @@ export default function App() {
             .filter((item) => item.quantity > 0)
         })
       })
-      .catch(() => setApiConnected(false))
-      .finally(() => setLoading(false))
-  }, [selectedCategory, searchQuery, sortBy])
+      .catch(() => {
+        // Caso a página solicitada tenha ficado vazia após filtro/exclusão, volta para a página 1
+        if (currentPage > 1) {
+          setCurrentPage(1)
+        } else {
+          setApiConnected(false)
+        }
+      })
+      .finally(() => {
+        setLoading(false)
+        setIsPageTransitioning(false)
+      })
+  }, [selectedCategory, searchQuery, sortBy, currentPage, pageSize])
 
   useEffect(() => {
     loadCatalog()
@@ -227,24 +306,34 @@ export default function App() {
     clearAuthTokens()
     setUser(null)
     setOrdersViewOpen(false)
+    setProductsManagementOpen(false)
+    setManagementMenuOpen(false)
     setCheckoutViewOpen(false)
     localStorage.removeItem(GUEST_CART_STORAGE_KEY)
     setCart([])
   }
 
   const handleDeleteProduct = async (product: Product) => {
-    if (!window.confirm(`Deseja realmente excluir o produto "${product.name}"?`)) {
+    const actionLabel = product.is_active ? 'desativar (Soft Delete)' : 'reativar'
+    if (
+      !window.confirm(
+        `Deseja ${actionLabel} o produto "${product.name}" na vitrine?\n(Para exclusão permanente do banco, utilize a aba Gestão de Produtos)`,
+      )
+    ) {
       return
     }
     try {
-      await deleteProduct(product.id)
-      setCart((prev) => prev.filter((item) => item.product.id !== product.id))
+      const updated = await toggleProductSoftDelete(product.id, !product.is_active)
+      if (!updated.is_active) {
+        setCart((prev) => prev.filter((item) => item.product.id !== product.id))
+      }
       if (selectedProduct?.id === product.id) {
-        setSelectedProduct(null)
+        setSelectedProduct(updated)
       }
       loadCatalog()
+      loadFeaturedProducts()
     } catch {
-      alert('Não foi possível excluir o produto. Verifique suas permissões.')
+      alert('Não foi possível alterar o status do produto. Verifique suas permissões.')
     }
   }
 
@@ -382,6 +471,8 @@ export default function App() {
             onClick={() => {
               setSelectedProduct(null)
               setOrdersViewOpen(false)
+              setProductsManagementOpen(false)
+              setManagementMenuOpen(false)
               setCheckoutViewOpen(false)
             }}
             className="flex items-center gap-3 cursor-pointer"
@@ -408,21 +499,24 @@ export default function App() {
               value={searchQuery}
               onChange={(e) => {
                 setSearchQuery(e.target.value)
+                setCurrentPage(1)
                 if (selectedProduct) setSelectedProduct(null)
                 if (ordersViewOpen) setOrdersViewOpen(false)
+                if (productsManagementOpen) setProductsManagementOpen(false)
               }}
               placeholder="Buscar produtos, categorias..."
               className="w-full pl-10 pr-4 py-2 text-sm rounded-xl border border-slate-200 bg-slate-100/70 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 transition"
             />
           </div>
 
-          {/* Actions: User Auth + Orders + Cart */}
+          {/* Actions: User Auth + Gerenciamento/Pedidos + Cart */}
           <div className="flex items-center gap-2.5">
-            {user && (
+            {user && !user.is_seller && (
               <button
                 onClick={() => {
                   setSelectedProduct(null)
                   setCheckoutViewOpen(false)
+                  setProductsManagementOpen(false)
                   setOrdersViewOpen((prev) => !prev)
                 }}
                 className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border text-xs sm:text-sm font-medium transition cursor-pointer ${
@@ -432,10 +526,121 @@ export default function App() {
                 }`}
               >
                 <ClipboardList className="w-4 h-4" />
-                <span className="hidden sm:inline">
-                  {user.is_seller ? 'Gestão de Pedidos' : 'Meus Pedidos'}
-                </span>
+                <span className="hidden sm:inline">Meus Pedidos</span>
               </button>
+            )}
+
+            {/* Menu em Cascata "Gerenciamento" exclusivo para Vendedor / Admin */}
+            {user?.is_seller && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setManagementMenuOpen((prev) => !prev)}
+                  className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border text-xs sm:text-sm font-semibold transition cursor-pointer ${
+                    ordersViewOpen || productsManagementOpen || managementMenuOpen
+                      ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                      : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                  }`}
+                >
+                  <Settings className="w-4 h-4" />
+                  <span className="hidden sm:inline">Gerenciamento</span>
+                  <ChevronDown
+                    className={`w-4 h-4 transition-transform duration-200 ${
+                      managementMenuOpen ? 'rotate-180' : ''
+                    }`}
+                  />
+                </button>
+
+                {/* Div em Cascata (Dropdown Menu) */}
+                {managementMenuOpen && (
+                  <>
+                    <div
+                      onClick={() => setManagementMenuOpen(false)}
+                      className="fixed inset-0 z-30"
+                    />
+                    <div className="absolute right-0 mt-2 w-64 rounded-2xl bg-white border border-slate-200 shadow-xl py-2 z-40 catalog-card-enter">
+                      <div className="px-3.5 py-2 border-b border-slate-100">
+                        <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                          Painel do Vendedor
+                        </p>
+                        <p className="text-xs font-semibold text-slate-700 truncate">
+                          Logado como {user.username}
+                        </p>
+                      </div>
+
+                      <div className="p-1.5 space-y-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setManagementMenuOpen(false)
+                            setSelectedProduct(null)
+                            setCheckoutViewOpen(false)
+                            setProductsManagementOpen(false)
+                            setOrdersViewOpen(true)
+                          }}
+                          className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-xs font-semibold transition cursor-pointer text-left ${
+                            ordersViewOpen
+                              ? 'bg-indigo-50 text-indigo-700'
+                              : 'text-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          <ClipboardList className="w-4 h-4 text-indigo-600 shrink-0" />
+                          <div>
+                            <div className="font-bold">Gestão de Pedidos</div>
+                            <div className="text-[11px] font-normal text-slate-500">
+                              Acompanhar e atualizar status
+                            </div>
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setManagementMenuOpen(false)
+                            setSelectedProduct(null)
+                            setCheckoutViewOpen(false)
+                            setOrdersViewOpen(false)
+                            setProductsManagementOpen(true)
+                          }}
+                          className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-xs font-semibold transition cursor-pointer text-left ${
+                            productsManagementOpen
+                              ? 'bg-indigo-50 text-indigo-700'
+                              : 'text-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          <Package className="w-4 h-4 text-indigo-600 shrink-0" />
+                          <div>
+                            <div className="font-bold">Gestão de Produtos</div>
+                            <div className="text-[11px] font-normal text-slate-500">
+                              Catálogo, estoque e categorias
+                            </div>
+                          </div>
+                        </button>
+
+                        <div className="my-1 border-t border-slate-100" />
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setManagementMenuOpen(false)
+                            setEditingProduct(null)
+                            setProductModalOpen(true)
+                          }}
+                          className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-xs font-semibold text-amber-800 bg-amber-50/80 hover:bg-amber-100 transition cursor-pointer text-left"
+                        >
+                          <Plus className="w-4 h-4 text-amber-600 shrink-0" />
+                          <div>
+                            <div className="font-bold">Novo Produto</div>
+                            <div className="text-[11px] font-normal text-amber-700">
+                              Cadastrar produto ou categoria
+                            </div>
+                          </div>
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
             )}
 
             {user ? (
@@ -488,33 +693,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* Painel de Gestão para Vendedor / Administrador */}
-      {user?.is_seller && (
-        <div className="bg-amber-50 border-b border-amber-200">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2 text-xs sm:text-sm text-amber-900">
-              <ShieldCheck className="w-5 h-5 text-amber-600 shrink-0" />
-              <span>
-                <strong>Modo Gestão Ativo ({user.username}):</strong> Você pertence ao
-                grupo <strong>Vendedor / Admin</strong> e pode cadastrar, editar ou
-                excluir produtos diretamente no catálogo.
-              </span>
-            </div>
-            <button
-              onClick={() => {
-                setEditingProduct(null)
-                setProductModalOpen(true)
-              }}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-600 text-white text-xs font-semibold hover:bg-amber-500 shadow-xs transition cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              Novo Produto
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Renderização Condicional: Checkout OU Pedidos OU Detalhes do Produto OU Vitrine Principal */}
+      {/* Renderização Condicional: Checkout OU Gestão de Produtos OU Pedidos OU Detalhes do Produto OU Vitrine Principal */}
       {checkoutViewOpen && user ? (
         <CheckoutView
           user={user}
@@ -528,6 +707,34 @@ export default function App() {
             loadCatalog()
             setCheckoutViewOpen(false)
             setOrdersViewOpen(true)
+          }}
+        />
+      ) : productsManagementOpen && user?.is_seller ? (
+        <ProductsManagementView
+          categories={categories}
+          onBack={() => setProductsManagementOpen(false)}
+          onOpenNewProduct={() => {
+            setEditingProduct(null)
+            setProductModalOpen(true)
+          }}
+          onEditProduct={(prod) => {
+            setEditingProduct(prod)
+            setProductModalOpen(true)
+          }}
+          onProductRemovedFromStore={(prodId) => {
+            setCart((prev) => prev.filter((item) => item.product.id !== prodId))
+            if (selectedProduct?.id === prodId) {
+              setSelectedProduct(null)
+            }
+          }}
+          onViewProduct={(prod) => {
+            setProductsManagementOpen(false)
+            setSelectedProduct(prod)
+          }}
+          onCategoriesRefresh={() => {
+            loadCategories()
+            loadCatalog()
+            loadFeaturedProducts()
           }}
         />
       ) : ordersViewOpen && user ? (
@@ -545,6 +752,7 @@ export default function App() {
           onBack={() => setSelectedProduct(null)}
           onSelectCategory={(catSlug) => {
             setSelectedCategory(catSlug)
+            setCurrentPage(1)
             setSelectedProduct(null)
           }}
           onSelectProduct={(prod) => setSelectedProduct(prod)}
@@ -581,62 +789,114 @@ export default function App() {
 
           {/* Main Content */}
           <main className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8 flex-1 space-y-8">
-            {/* Barra de Categorias + Seletor de Ordenação */}
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div className="flex items-center gap-2 overflow-x-auto pb-1">
+            {/* Barra de Categorias (Rolagem Horizontal com Wrap-Around) + Seletor de Ordenação e Limite por Página */}
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+              {/* Container de Categorias isolado com min-w-0 e botões < > para nunca empurrar os seletores da direita */}
+              <div className="flex items-center gap-1.5 min-w-0 flex-1">
                 <button
-                  onClick={() => setSelectedCategory('')}
-                  className={`px-4 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition cursor-pointer ${
-                    selectedCategory === ''
-                      ? 'bg-indigo-600 text-white shadow-sm'
-                      : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
-                  }`}
+                  type="button"
+                  onClick={() => handleScrollCategories('left')}
+                  title="Rolar categorias para a esquerda"
+                  className="p-2 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 hover:text-indigo-600 shrink-0 shadow-2xs transition cursor-pointer"
                 >
-                  Todos os Produtos
+                  <ChevronLeft className="w-4 h-4" />
                 </button>
-                {categories.map((cat) => (
+
+                <div
+                  ref={categoryScrollRef}
+                  className="flex items-center gap-2 overflow-x-auto no-scrollbar scroll-smooth py-0.5 min-w-0 flex-1"
+                >
                   <button
-                    key={cat.id}
-                    onClick={() => setSelectedCategory(cat.slug)}
-                    className={`px-4 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition cursor-pointer ${
-                      selectedCategory === cat.slug
+                    onClick={() => {
+                      setSelectedCategory('')
+                      setCurrentPage(1)
+                    }}
+                    className={`px-4 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition cursor-pointer shrink-0 ${
+                      selectedCategory === ''
                         ? 'bg-indigo-600 text-white shadow-sm'
                         : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
                     }`}
                   >
-                    {cat.name}
+                    Todos os Produtos
                   </button>
-                ))}
+                  {categories.map((cat) => (
+                    <button
+                      key={cat.id}
+                      onClick={() => {
+                        setSelectedCategory(cat.slug)
+                        setCurrentPage(1)
+                      }}
+                      className={`px-4 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition cursor-pointer shrink-0 ${
+                        selectedCategory === cat.slug
+                          ? 'bg-indigo-600 text-white shadow-sm'
+                          : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      {cat.name}
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => handleScrollCategories('right')}
+                  title="Rolar categorias para a direita"
+                  className="p-2 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 hover:text-indigo-600 shrink-0 shadow-2xs transition cursor-pointer"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
               </div>
 
-              {/* Ordenação de Produtos */}
-              <div className="flex items-center gap-2">
-                <ArrowUpDown className="w-4 h-4 text-slate-400" />
-                <select
-                  value={sortBy}
-                  onChange={(e) => setSortBy(e.target.value)}
-                  className="px-3.5 py-2 rounded-xl border border-slate-200 bg-white text-xs sm:text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
-                >
-                  <option value="">Ordenar por: Destaques</option>
-                  <option value="price">Menor Preço</option>
-                  <option value="-price">Maior Preço</option>
-                  <option value="name">Nome (A–Z)</option>
-                  <option value="-created_at">Mais Recentes</option>
-                </select>
+              {/* Limite de Produtos por Página + Ordenação (Fixos à direita com shrink-0) */}
+              <div className="flex flex-wrap items-center gap-3 shrink-0">
+                <div className="flex items-center gap-1.5">
+                  <Layers className="w-4 h-4 text-slate-400" />
+                  <select
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value))
+                      setCurrentPage(1)
+                    }}
+                    aria-label="Quantidade de produtos por página"
+                    className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs sm:text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
+                  >
+                    <option value={4}>Exibir: 4 por página</option>
+                    <option value={8}>Exibir: 8 por página</option>
+                    <option value={12}>Exibir: 12 por página</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <ArrowUpDown className="w-4 h-4 text-slate-400" />
+                  <select
+                    value={sortBy}
+                    onChange={(e) => {
+                      setSortBy(e.target.value)
+                      setCurrentPage(1)
+                    }}
+                    className="px-3.5 py-2 rounded-xl border border-slate-200 bg-white text-xs sm:text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
+                  >
+                    <option value="">Ordenar por: Destaques</option>
+                    <option value="price">Menor Preço</option>
+                    <option value="-price">Maior Preço</option>
+                    <option value="name">Nome (A–Z)</option>
+                    <option value="-created_at">Mais Recentes</option>
+                  </select>
+                </div>
               </div>
             </div>
 
             {/* Carrossel de Banners Verticais de Produtos em Destaque (Estilo Amazon) */}
-            {!loading && !searchQuery && (
+            {!searchQuery && (
               <FeaturedCarousel
-                products={products}
+                products={featuredProducts.length > 0 ? featuredProducts : products}
                 onSelectProduct={(prod) => setSelectedProduct(prod)}
                 onAddToCart={(prod) => addToCart(prod, 1)}
               />
             )}
 
             {/* Título da Grade de Catálogo */}
-            <div className="flex items-center justify-between pt-2 border-t border-slate-200/80">
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200/80">
               <h2 className="text-lg font-extrabold text-slate-900">
                 {selectedCategory
                   ? `Catálogo: ${categories.find((c) => c.slug === selectedCategory)?.name || ''}`
@@ -645,12 +905,13 @@ export default function App() {
                     : 'Catálogo Completo'}
               </h2>
               <span className="text-xs font-medium text-slate-500">
-                {products.length} produto(s) encontrado(s)
+                Exibindo {products.length} de {totalProductsCount} produto(s) • Página{' '}
+                {currentPage} de {totalPages}
               </span>
             </div>
 
-            {/* Product Grid */}
-            {loading ? (
+            {/* Product Grid com Transição Suave via GPU (opacity + transform) */}
+            {loading && products.length === 0 ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
                 {[1, 2, 3, 4].map((n) => (
                   <div
@@ -676,11 +937,18 @@ export default function App() {
                 </p>
               </div>
             ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                {products.map((product) => (
+              <div
+                className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 transition-all duration-300 ease-in-out ${
+                  isPageTransitioning
+                    ? 'opacity-20 translate-y-1.5 scale-[0.985] pointer-events-none'
+                    : 'opacity-100 translate-y-0 scale-100'
+                }`}
+              >
+                {products.map((product, idx) => (
                   <article
-                    key={product.id}
-                    className={`group bg-white rounded-2xl border overflow-hidden shadow-xs hover:shadow-md transition flex flex-col ${
+                    key={`${currentPage}-${pageSize}-${product.id}`}
+                    style={{ animationDelay: `${idx * 65}ms` }}
+                    className={`catalog-card-enter group bg-white rounded-2xl border overflow-hidden shadow-xs hover:shadow-md transition flex flex-col ${
                       product.is_active ? 'border-slate-200' : 'border-rose-300 opacity-75'
                     }`}
                   >
@@ -788,6 +1056,70 @@ export default function App() {
                     </div>
                   </article>
                 ))}
+              </div>
+            )}
+
+            {/* Barra de Paginação Customizada (CatalogPagination DRF) */}
+            {!loading && totalProductsCount > 0 && (
+              <div className="pt-4 border-t border-slate-200/80 flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div className="text-xs text-slate-500">
+                  Mostrando{' '}
+                  <strong className="text-slate-800">
+                    {(currentPage - 1) * pageSize + 1}
+                  </strong>{' '}
+                  a{' '}
+                  <strong className="text-slate-800">
+                    {Math.min(currentPage * pageSize, totalProductsCount)}
+                  </strong>{' '}
+                  de <strong className="text-slate-800">{totalProductsCount}</strong>{' '}
+                  produtos
+                </div>
+
+                {totalPages > 1 && (
+                  <nav
+                    aria-label="Paginação do catálogo"
+                    className="inline-flex items-center gap-1.5"
+                  >
+                    <button
+                      type="button"
+                      disabled={currentPage <= 1}
+                      onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                      Anterior
+                    </button>
+
+                    {Array.from({ length: totalPages }, (_, idx) => idx + 1).map(
+                      (pageNum) => (
+                        <button
+                          key={pageNum}
+                          type="button"
+                          onClick={() => setCurrentPage(pageNum)}
+                          className={`w-8 h-8 rounded-xl text-xs font-bold transition cursor-pointer ${
+                            pageNum === currentPage
+                              ? 'bg-indigo-600 text-white shadow-xs'
+                              : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          {pageNum}
+                        </button>
+                      ),
+                    )}
+
+                    <button
+                      type="button"
+                      disabled={currentPage >= totalPages}
+                      onClick={() =>
+                        setCurrentPage((prev) => Math.min(totalPages, prev + 1))
+                      }
+                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer"
+                    >
+                      Próxima
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                  </nav>
+                )}
               </div>
             )}
           </main>
@@ -964,7 +1296,14 @@ export default function App() {
         categories={categories}
         editingProduct={editingProduct}
         onClose={() => setProductModalOpen(false)}
-        onSaved={() => loadCatalog()}
+        onCategoryCreated={(newCat) => {
+          setCategories((prev) => [...prev, newCat])
+        }}
+        onSaved={() => {
+          loadCatalog()
+          loadFeaturedProducts()
+          loadCategories()
+        }}
       />
 
       {/* Cart Drawer com Transição Suave (Slide-over + Backdrop Fade) */}
